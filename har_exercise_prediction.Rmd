@@ -9,7 +9,7 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-```{r, results='hide'}
+```{r, results='hide', warning=FALSE}
 library(ggplot2)
 library(GGally)
 library(dplyr)
@@ -97,7 +97,7 @@ testData <- pmlTrainSubset[-trainlndex,]
 
 The next step towards predicting the class of exercise performance is to choose or engineer the features. Here we train an initial xgboost model using all the standard features and 10-fold cross validation to help control overfitting.  Then we use the importance measure in the xgboost package to determine which features we should include in our final model.
 
-```{r, results='hide'}
+```{r, warning=FALSE}
 ctrl <- trainControl(method = 'cv',
                      number = 10)
 
@@ -127,7 +127,7 @@ names <- colnames(select(pmlTrainSubsetClean, -classe))
 importance_matrix <- xgb.importance(feature_names = names, model = fit.xgb$finalModel)
 
 # plot importance with clustering
-gp <- xgb.ggplot.importance(importance_matrix)
+gp <- xgb.ggplot.importance(importance_matrix, n_clusters = 4)
 print(gp)
 
 ```
