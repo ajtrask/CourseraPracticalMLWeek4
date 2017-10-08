@@ -1,0 +1,204 @@
+---
+title: "HAR Exercise Quality Prediction"
+author: "Aaron Trask"
+date: "October 4, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE}
+library(ggplot2)
+library(GGally)
+library(dplyr)
+library(reshape2)
+library(caret)
+library(pROC)
+library(xgboost)
+```
+
+Set the seed for reproducability:
+```{r}
+set.seed(1234)
+```
+
+## PML Data Exploration and Cleaning
+Bring in the training data:
+
+```{r}
+pmlTrain <- read.csv('pml-training.csv', header=TRUE)
+dim(pmlTrain)
+```
+
+The data consist of measurements from sensors while participants perform free weight exercises correctly and incorrectly. The sensors are mounted on a belt, arm, forearm, and dumbell during the exercises. The question posed is can we predict the class of the movement based on these sensor measurements. Specifically for this problem, the test set only contains single measurements so we are not using measurement sequences which would mostly likely perform better in the prediction task. Also, the test set only has measurements for roll, pitch, yaw, total acceleration, gyros (angular rate), acceleration, and magnet (local vertical) for each of the locations (belt, arm, forearm, and dumbbell). Here we subset the training set to these measurements:
+
+```{r}
+belt_meas_cols <- c(8:11, 37:45)
+arm_meas_cols <- c(46:49, 60:68)
+dumbbell_meas_cols <- c(84:86,102,113:121)
+forearm_meas_cols <- c(122:124,140,151:159)
+pmlTrainSubset <- subset(pmlTrain, select=c(belt_meas_cols,arm_meas_cols,forearm_meas_cols,dumbbell_meas_cols,160))
+
+dim(pmlTrainSubset)
+```
+
+The data also has some clear outliers that we will assume are measurement anomalies.  Here we remove them from the training set:
+
+```{r}
+# filter out gyro measurements with large absolute value
+maxgyro <- 10
+pmlTrainSubsetClean <- filter(pmlTrainSubset, abs(gyros_forearm_x) < maxgyro & abs(gyros_forearm_y) < maxgyro & abs(gyros_forearm_z) < maxgyro)
+pmlTrainSubsetClean <- filter(pmlTrainSubsetClean, abs(gyros_arm_x) < maxgyro & abs(gyros_arm_y) < maxgyro & abs(gyros_arm_z) < maxgyro)
+pmlTrainSubsetClean <- filter(pmlTrainSubsetClean, abs(gyros_belt_x) < maxgyro & abs(gyros_belt_y) < maxgyro & abs(gyros_belt_z) < maxgyro)
+pmlTrainSubsetClean <- filter(pmlTrainSubsetClean, abs(gyros_dumbbell_x) < maxgyro & abs(gyros_dumbbell_y) < maxgyro & abs(gyros_dumbbell_z) < maxgyro)
+
+# filter out magnetometer measurements with large absolute value
+maxmagnet <- 2000
+pmlTrainSubsetClean <- filter(pmlTrainSubsetClean, abs(magnet_forearm_x) < maxmagnet & abs(magnet_forearm_y) < maxmagnet & abs(magnet_forearm_z) < maxmagnet)
+pmlTrainSubsetClean <- filter(pmlTrainSubsetClean, abs(magnet_arm_x) < maxmagnet & abs(magnet_arm_y) < maxmagnet & abs(magnet_arm_z) < maxmagnet)
+pmlTrainSubsetClean <- filter(pmlTrainSubsetClean, abs(magnet_belt_x) < maxmagnet & abs(magnet_belt_y) < maxmagnet & abs(magnet_belt_z) < maxmagnet)
+pmlTrainSubsetClean <- filter(pmlTrainSubsetClean, abs(magnet_dumbbell_x) < maxmagnet & abs(magnet_dumbbell_y) < maxmagnet & abs(magnet_dumbbell_z) < maxmagnet)
+
+dim(pmlTrainSubsetClean)
+```
+
+Looking at a pairs plot gives us a visualization of how features interact.  Here we look at all the roll angle measurements:
+
+```{r, fig.width=8, fig.height=8}
+#ggpairs(data = pmlTrainSubsetClean,
+#        columns = grep(pattern = "belt", x = colnames(pmlTrainSubsetClean)),
+#        mapping = aes(color = classe))
+#ggpairs(data = pmlTrainSubsetClean,
+#        columns = grep(pattern = "_arm", x = colnames(pmlTrainSubsetClean)),
+#        mapping = aes(color = classe))
+#ggpairs(data = pmlTrainSubsetClean,
+#        columns = grep(pattern = "forearm", x = colnames(pmlTrainSubsetClean)),
+#        mapping = aes(color = classe))
+#ggpairs(data = pmlTrainSubsetClean,
+#        columns = grep(pattern = "dumbbell", x = colnames(pmlTrainSubsetClean)),
+#        mapping = aes(color = classe))
+ggpairs(data = pmlTrainSubsetClean,
+        columns = grep(pattern = "roll", x = colnames(pmlTrainSubsetClean)),
+        mapping = aes(color = classe))
+```
+
+Before we start training a model, we will split the data so we have a test set for model performance evaluation.
+
+```{r}
+# partition the data
+trainlndex <- createDataPartition(pmlTrainSubsetClean$classe,p=0.60,list=FALSE)
+trainData <- pmlTrainSubset[trainlndex,]
+testData <- pmlTrainSubset[-trainlndex,]
+```
+
+## Feature Selection
+
+The next step towards predicting the class of exercise performance is to choose or engineer the features. Here we train an initial xgboost model using all the standard features and 10-fold cross validation to help control overfitting.  Then we use the importance measure in the xgboost package to determine which features we should include in our final model.
+
+```{r}
+ctrl <- trainControl(method = 'cv',
+                     number = 10)
+
+fit.grid <- expand.grid(eta = 0.3,
+                        max_depth = 3,
+                        colsample_bytree = 0.6,
+                        subsample = 0.5,
+                        nrounds = 50,
+                        gamma = 0,
+                        min_child_weight = 1)
+
+fit.xgb <- train(classe~.,
+                 data = trainData,
+                 method = 'xgbTree',
+                 metric = 'Accuracy',
+                 trControl = ctrl,
+                 tuneGrid = fit.grid)
+
+fit.xgb$results
+```
+
+```{r, fig.width=8, fig.height=15}
+# get the feature real names
+names <- colnames(select(pmlTrainSubsetClean, -classe))
+
+# compute feature importance matrix
+importance_matrix <- xgb.importance(feature_names = names, model = fit.xgb$finalModel)
+
+# plot importance with clustering
+gp <- xgb.ggplot.importance(importance_matrix)
+print(gp)
+
+```
+
+From this cluster bar plot, we will grab the first two clusters for our final model feature set.
+
+```{r}
+# grab the feature list for cluster 2 and 3
+features <- subset(gp$data, Cluster==2 | Cluster==3)$Feature
+features
+```
+
+## Train the Final Model
+
+Now we train the final model using the subset of features identified above.  We also use a grid search on the model tuning parameters and repeated 10-fold cross validation to try and keep overfitting under control.
+
+
+```{r}
+# create model with most important features from before
+ctrl <- trainControl(method = 'repeatedcv',
+                     number = 10,
+                     repeats = 3)
+
+fit.grid <- expand.grid(eta = 0.3,
+                        max_depth = c(2,4,6),
+                        colsample_bytree = 0.9,
+                        subsample = 0.75,
+                        nrounds = 50,
+                        gamma = 0,
+                        min_child_weight = 1)
+
+fit.xgb <- train(as.formula(paste(c("classe",paste(features, collapse = "+")), collapse = "~")),
+                 data = trainData,
+                 method = 'xgbTree',
+                 metric = 'Accuracy',
+                 trControl = ctrl,
+                 tuneGrid = fit.grid)
+
+fit.xgb$bestTune
+```
+
+Based on the results of the grid search for Max Tree Depth, 6 performs the best in accuracy from the repeated cross-validation.
+
+```{r}
+# Plot the performance of the training models
+plot(fit.xgb)
+```
+
+We can also look at the confusion matrix from the final model predictions on our held back test data.  We get an overall accuracy of 0.9847.
+
+```{r}
+### xgboost Model Predictions and Performance
+# Make predictions using the test data set
+fit.pred <- predict(fit.xgb,testData)
+
+#Look at the confusion matrix
+confusionMatrix(fit.pred,testData$classe)
+```
+
+## Conclusion
+
+So it looks like the model does pretty well.  This isn't bad for single measurement prediction.  If we were to use a machine learning method on the time series instead of single points, we would more likely capture the mechanics of this problem.  Predicting classes from single measurements and ignoring the relation between measurements in a series is unlikely to capture the mechanics of this problem.
+
+## Predict the Problem Test Classes
+
+```{r}
+# Read in the test data
+pmlTest <- read.csv('pml-testing.csv', header=TRUE)
+
+# Make predictions using the test data set
+fit.pred <- predict(fit.xgb,pmlTest)
+
+fit.pred
+```
